@@ -8,6 +8,7 @@ in
 , clusterProfile ? defaultCustomConfig.localCluster.profileName
 , autoStartCluster ? defaultCustomConfig.localCluster.autoStartCluster
 , workbenchDevMode ? defaultCustomConfig.localCluster.workbenchDevMode
+, withR ? false
 , customConfig ? {
     inherit withHoogle;
     localCluster =  {
@@ -45,7 +46,7 @@ let
       export LOCALE_ARCHIVE="${pkgs.glibcLocales}/lib/locale/locale-archive"
     '';
 
-  haveGlibcLocales = pkgs.glibcLocales != null && stdenv.hostPlatform.libc == "glibc";        
+  haveGlibcLocales = pkgs.glibcLocales != null && stdenv.hostPlatform.libc == "glibc";
 
   # This provides a development environment that can be used with nix-shell or
   # lorri. See https://input-output-hk.github.io/haskell.nix/user-guide/development/
@@ -59,6 +60,10 @@ let
         profileName = clusterProfile;
         workbench = pkgs.callPackage ./nix/workbench { inherit useCabalRun; };
       };
+
+  rstudio = pkgs.rstudioWrapper.override {
+    packages = with pkgs.rPackages; [ car dplyr ggplot2 reshape2 ];
+  };
 
   shell =
     let cluster = mkCluster { useCabalRun = true; };
@@ -99,6 +104,10 @@ let
     ++ lib.optionals (!workbenchDevMode)
     [
       cluster.workbench.workbench
+    ]
+    ++ lib.optionals withR
+    [
+      rstudio
     ]
     ## Local cluster not available on Darwin,
     ## because psmisc fails to build on Big Sur.
