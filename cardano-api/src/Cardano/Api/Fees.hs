@@ -1,3 +1,4 @@
+
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE EmptyCase #-}
@@ -13,11 +14,9 @@
 -- | Fee calculation
 --
 module Cardano.Api.Fees (
-
-    -- * Transaction fees
+    BalanceTxBodyError(..),
     transactionFee,
     estimateTransactionFee,
-    evaluateTransactionFee,
     estimateTransactionKeyWitnessCount,
 
     -- * Script execution units
@@ -31,51 +30,57 @@ module Cardano.Api.Fees (
     -- * Automated transaction building
     makeTransactionBodyAutoBalance,
     TxBodyErrorAutoBalance(..),
+     -- * Error rendering
+    renderPlutusFailure,
+    renderTxExecutionUnitsError,
   ) where
 
 import           Prelude
 
-import           Data.Maybe (fromMaybe)
-import qualified Data.ByteString as BS
-import           Data.Bifunctor (bimap, first)
+import qualified Data.Aeson as Aeson
 import qualified Data.Array as Array
-import           Data.Set (Set)
-import qualified Data.Set as Set
-import qualified Data.Text as Text
+import           Data.Bifunctor (bimap, first)
+import qualified Data.ByteString as BS
 import           Data.Map (Map)
 import qualified Data.Map as Map
+import           Data.Sequence.Strict (StrictSeq (..))
+import           Data.Set (Set)
+import qualified Data.Set as Set
+import           Data.Text (Text)
+import qualified Data.Text as Text
 import           GHC.Records (HasField (..))
 import           Numeric.Natural
-import           Data.Sequence.Strict (StrictSeq(..))
 
+import           Control.Monad.Trans.Except
 import qualified Data.Text.Prettyprint.Doc as PP
 import qualified Data.Text.Prettyprint.Doc.Render.String as PP
-import           Control.Monad.Trans.Except
 
 import qualified Cardano.Binary as CBOR
 import           Cardano.Slotting.EpochInfo (EpochInfo, hoistEpochInfo)
 
 import qualified Cardano.Chain.Common as Byron
 
+import qualified Cardano.Ledger.Alonzo.Tools as Alonzo
+import qualified Cardano.Ledger.Alonzo.Tx as Alonzo
 import qualified Cardano.Ledger.Coin as Ledger
 import qualified Cardano.Ledger.Core as Ledger
-import qualified Cardano.Ledger.Era  as Ledger.Era (Crypto)
-import qualified Cardano.Ledger.Keys as Ledger
 import qualified Cardano.Ledger.Crypto as Ledger
-import qualified Shelley.Spec.Ledger.API as Ledger (CLI, TxIn, DCert, Wdrl)
-import qualified Shelley.Spec.Ledger.API.Wallet as Ledger
-                   (evaluateTransactionBalance, evaluateTransactionFee)
+import qualified Cardano.Ledger.Era as Ledger
+import qualified Cardano.Ledger.Era as Ledger.Era (Crypto)
+import qualified Cardano.Ledger.Keys as Ledger
+import qualified Shelley.Spec.Ledger.API as Ledger (CLI, DCert, TxIn, Wdrl)
+import qualified Shelley.Spec.Ledger.API.Wallet as Ledger (evaluateTransactionBalance,
+                   evaluateTransactionFee)
 
-import           Shelley.Spec.Ledger.PParams (PParams'(..))
+import           Shelley.Spec.Ledger.PParams (PParams' (..))
 
 import qualified Cardano.Ledger.Mary.Value as Mary
 
-import           Cardano.Ledger.Alonzo.PParams (PParams'(..))
 import qualified Cardano.Ledger.Alonzo as Alonzo
 import qualified Cardano.Ledger.Alonzo.Language as Alonzo
+import           Cardano.Ledger.Alonzo.PParams (PParams' (..))
 import qualified Cardano.Ledger.Alonzo.Scripts as Alonzo
 import qualified Cardano.Ledger.Alonzo.TxWitness as Alonzo
-import qualified Cardano.Ledger.Alonzo.Tools as Alonzo
 
 import qualified Plutus.V1.Ledger.Api as Plutus
 
@@ -90,9 +95,13 @@ import           Cardano.Api.NetworkId
 import           Cardano.Api.ProtocolParameters
 import           Cardano.Api.Query
 import           Cardano.Api.Script
+import           Cardano.Api.SerialiseRaw
 import           Cardano.Api.Tx
 import           Cardano.Api.TxBody
 import           Cardano.Api.Value
+
+--TODO: Expose through ledger-specs
+import qualified PlutusCore.Pretty as Plutus
 
 {- HLINT ignore "Redundant return" -}
 
@@ -209,9 +218,6 @@ evaluateTransactionFee :: forall era.
                        -> Word  -- ^ The number of Shelley key witnesses
                        -> Word  -- ^ The number of Byron key witnesses
                        -> Lovelace
-evaluateTransactionFee _ _ _ byronwitcount | byronwitcount > 0 =
-  error "evaluateTransactionFee: TODO support Byron key witnesses"
-
 evaluateTransactionFee pparams txbody keywitcount _byronwitcount =
     case makeSignedTransaction [] txbody of
       ByronTx{} -> case shelleyBasedEra :: ShelleyBasedEra era of {}
@@ -326,7 +332,7 @@ data ScriptExecutionError =
 
        -- | The script evaluation failed. This usually means it evaluated to an
        -- error value. This is not a case of running out of execution units
-       -- (which is not possible for 'evaluateTransactionExecutionUnits' since 
+       -- (which is not possible for 'evaluateTransactionExecutionUnits' since
        -- the whole point of it is to discover how many execution units are
        -- needed).
        --
@@ -415,6 +421,256 @@ instance Error TransactionValidityIntervalError where
 --
 -- This works by running all the scripts and counting how many execution units
 -- are actually used.
+data BalanceTxBodyError era =
+       BalanceTxBodyErr (TxBodyError era)
+     | BalanceScriptFailure ScriptFailure
+     | BalanceMoreInputsNeeded Lovelace Lovelace Aeson.Value
+     | BalanceMinUTxONotMet
+     | BalanceByronEraNotSupported
+     | BalanceMinUTxOPParamNotFound
+     | BalanceCostPerWordPParamNotFound
+     | BalanceTxExecUnits TxExecutionUnitsError
+     | BalanceTxValidityErr TransactionValidityIntervalError
+     | BalanceTxScriptExeError ScriptExecutionError
+  deriving Show
+
+instance Error (BalanceTxBodyError era) where
+  displayError (BalanceTxBodyErr e) =
+    "Transaction balance body error: " <> displayError e
+  displayError (BalanceScriptFailure sFailure) =
+    show $ renderPlutusFailure sFailure
+  displayError (BalanceMoreInputsNeeded currentBalance fee utxoVal ) =
+    "Transaction balance needs more inputs. Current balance: " <> show currentBalance <>
+    "\n" <> "Fee :" <> show fee <> "\n" <> "UTxOVal: " <> show utxoVal
+
+  displayError BalanceMinUTxONotMet =
+    "Transaction balance minimum UTxO not met"
+  displayError BalanceByronEraNotSupported =
+    "Transaction balance Byron era not supported"
+  displayError BalanceMinUTxOPParamNotFound =
+    "Transaction balance min UTxO protocol parameter not found"
+  displayError BalanceCostPerWordPParamNotFound =
+    "Transaction balance cost per word protocol parameter not found"
+  displayError (BalanceTxExecUnits txExecErr) =
+    show $ renderTxExecutionUnitsError txExecErr
+  displayError  _ = error ""
+-- Steps:
+-- 1. evaluate all the scripts to get the exec units, update with ex units
+-- 2. figure out the overall min fees
+-- 3. update tx with fees
+-- 4. balance the transaction and update tx change output
+
+makeTransactionBodyAutoBalance :: ShelleyBasedEra era
+                               -> EraInMode era mode
+                               -> SystemStart
+                               -> EraHistory mode
+                               -> ProtocolParameters
+                               -> Set PoolId
+                               -> UTxO era
+                               -> TxBodyContent BuildTx era
+                               -> AddressInEra era
+                               -> Either (BalanceTxBodyError era)
+                                         (TxBody era, Map ScriptWitnessIndex ExecutionUnits, Lovelace)
+makeTransactionBodyAutoBalance sbe eraInMode systemstart history pparams
+                               poolids utxo txbodycontent changeaddr = do
+    txbody0 <- first BalanceTxBodyErr $
+                 obtainIsCardanoEraConstraint sbe $ makeTransactionBody txbodycontent
+
+    exUnitsMap <- first BalanceTxValidityErr $
+                    evaluateTransactionExecutionUnits
+                      eraInMode
+                      systemstart history
+                      pparams utxo
+                      txbody0
+
+    exUnitsMap' <- traverse (first BalanceTxScriptExeError) exUnitsMap
+
+    let txbodycontent1 = substituteExecutionUnits exUnitsMap' txbodycontent
+
+    explicitInE <- first (const BalanceByronEraNotSupported)
+                     $ txFeesExplicitInEra (shelleyBasedToCardanoEra sbe)
+
+    -- Insert change address and set tx fee to 0
+    txbodyWithExecUnitsZeroFeeAndChangeAddress <- obtainIsEra sbe $ first BalanceTxBodyErr $ -- TODO: impossible to fail now
+               makeTransactionBody txbodycontent1 {
+                 txFee  = TxFeeExplicit explicitInE 0,
+                 txOuts = TxOut changeaddr
+                                (lovelaceToTxOutValue 0)
+                                TxOutDatumHashNone
+                        : txOuts txbodycontent
+                 --TODO: think about the size of the change output
+                 -- 1,2,4 or 8 bytes?
+               }
+
+    let txfee = obtainIsCardanoEraConstraint sbe
+                  $ obtainLedgerEra sbe $ evaluateTransactionFee pparams txbodyWithExecUnitsZeroFeeAndChangeAddress 1 0
+    txbody2WithFee <- first BalanceTxBodyErr $ -- TODO: impossible to fail now
+                obtainIsEra sbe $ makeTransactionBody txbodycontent1 {
+                 txFee = TxFeeExplicit explicitInE txfee
+               }
+
+    let balance = obtainCLI sbe $ evaluateTransactionBalance sbe pparams poolids utxo txbody2WithFee
+    -- check if the balance is positive or negative
+    -- in one case we can produce change, in the other the inputs are insufficient
+    minUTxOValue <- getMinUTxOValue pparams
+    case balance of
+      TxOutAdaOnly _ l -> obtainIsEra sbe $ balanceCheck minUTxOValue l txfee utxo
+      TxOutValue _ v   ->
+        case valueToLovelace v of
+          Nothing -> Left $ error "TODO: non-ada assets not balanced"
+          Just c -> obtainIsEra sbe $ balanceCheck minUTxOValue c txfee utxo
+
+    --TODO: we could add the extra fee for the CBOR encoding of the change,
+    -- now that we know the magnitude of the change: i.e. 1-8 bytes extra.
+
+    txbody3 <- first BalanceTxBodyErr $ -- TODO: impossible to fail now
+               obtainIsEra sbe $ makeTransactionBody txbodycontent {
+                 txFee  = TxFeeExplicit explicitInE txfee,
+                 txOuts = TxOut changeaddr balance TxOutDatumHashNone
+                        : txOuts txbodycontent
+               }
+
+    return (txbody3, exUnitsMap', txfee)
+ where
+   obtainIsEra
+     :: ShelleyBasedEra era
+     -> (( IsCardanoEra era
+       ) => a) -> a
+   obtainIsEra ShelleyBasedEraShelley f = f
+   obtainIsEra ShelleyBasedEraAllegra f = f
+   obtainIsEra ShelleyBasedEraMary    f = f
+   obtainIsEra ShelleyBasedEraAlonzo  f = f
+
+   obtainCLI
+     :: ShelleyBasedEra era
+     -> (( Ledger.CLI (ShelleyLedgerEra era)
+       ) => a) -> a
+   obtainCLI ShelleyBasedEraShelley f = f
+   obtainCLI ShelleyBasedEraAllegra f = f
+   obtainCLI ShelleyBasedEraMary    f = f
+   obtainCLI ShelleyBasedEraAlonzo  f = f
+
+
+   obtainIsCardanoEraConstraint
+     :: ShelleyBasedEra era
+     -> (( IsCardanoEra era
+         , Ledger.CLI (ShelleyLedgerEra era)
+       ) => a) -> a
+   obtainIsCardanoEraConstraint ShelleyBasedEraShelley f = f
+   obtainIsCardanoEraConstraint ShelleyBasedEraAllegra f = f
+   obtainIsCardanoEraConstraint ShelleyBasedEraMary    f = f
+   obtainIsCardanoEraConstraint ShelleyBasedEraAlonzo  f = f
+
+   obtainLedgerEra
+     :: ShelleyBasedEra era
+     -> (( Ledger.Era (ShelleyLedgerEra era)
+         , IsShelleyBasedEra era
+         , CBOR.ToCBOR (Ledger.AuxiliaryData (ShelleyLedgerEra era))
+         , CBOR.ToCBOR (Ledger.TxBody (ShelleyLedgerEra era))
+         , CBOR.ToCBOR (Ledger.Witnesses (ShelleyLedgerEra era))
+         , HasField "certs" (Ledger.TxBody (ShelleyLedgerEra era))
+             (StrictSeq (Ledger.DCert Ledger.StandardCrypto))
+         ) => a) -> a
+   obtainLedgerEra ShelleyBasedEraShelley f = f
+   obtainLedgerEra ShelleyBasedEraAllegra f = f
+   obtainLedgerEra ShelleyBasedEraMary    f = f
+   obtainLedgerEra ShelleyBasedEraAlonzo  f = f
+
+   balanceCheck :: IsCardanoEra era => Lovelace -> Lovelace -> Lovelace -> UTxO era -> Either (BalanceTxBodyError era) ()
+   balanceCheck minUTxOValue balance fee utxo'
+    | balance < 0 = Left $ BalanceMoreInputsNeeded balance fee (Aeson.toJSON utxo')
+      -- check the change is over the min utxo threshold
+    | balance < minUTxOValue = Left BalanceMinUTxONotMet
+    | otherwise = return ()
+
+   getMinUTxOValue :: ProtocolParameters ->  Either (BalanceTxBodyError era) Lovelace
+   getMinUTxOValue pparams' =
+     case sbe of
+       ShelleyBasedEraShelley -> minUTxOHelper pparams'
+       ShelleyBasedEraAllegra -> minUTxOHelper pparams'
+       ShelleyBasedEraMary -> minUTxOHelper pparams'
+       ShelleyBasedEraAlonzo -> case protocolParamUTxOCostPerWord pparams' of
+                                  Just minUtxo -> Right minUtxo
+                                  Nothing -> Left BalanceCostPerWordPParamNotFound
+
+   minUTxOHelper :: ProtocolParameters -> Either (BalanceTxBodyError era) Lovelace
+   minUTxOHelper pparams' = case protocolParamMinUTxOValue pparams' of
+                             Just minUtxo -> Right minUtxo
+                             Nothing -> Left BalanceMinUTxOPParamNotFound
+
+substituteExecutionUnits :: Map ScriptWitnessIndex ExecutionUnits
+                         -> TxBodyContent BuildTx era
+                         -> TxBodyContent BuildTx era
+substituteExecutionUnits exUnitsMap =
+    mapTxScriptWitnesses f
+  where
+    f :: ScriptWitnessIndex
+      -> ScriptWitness witctx era
+      -> ScriptWitness witctx era
+    f _   wit@SimpleScriptWitness{} = wit
+    f idx wit@(PlutusScriptWitness langInEra version script datum redeemer _) =
+      case Map.lookup idx exUnitsMap of
+        Nothing      -> wit
+        Just exunits -> PlutusScriptWitness langInEra version script
+                                            datum redeemer exunits
+
+data ScriptFailure
+  = UnnecessaryRedeemer ScriptWitnessIndex
+  | MissingScript ScriptWitnessIndex
+  | MissingDatum (Hash ScriptData)
+  | ValidationFailed Plutus.EvaluationError
+  | MissingSpendingTxIn TxIn
+  | SpendingTxInMissingDatumHash TxIn
+  | IncompatibleBudget Plutus.ExBudget
+  deriving Show
+
+renderPlutusFailure :: ScriptFailure -> Text
+renderPlutusFailure (UnnecessaryRedeemer index) =
+  "Unnecessary redeemer at: " <> renderScriptWitnessIndex index
+renderPlutusFailure (MissingScript index) =
+  "Missing Plutus script at: " <> renderScriptWitnessIndex index
+renderPlutusFailure (MissingDatum dHash) =
+  "Missing datum with hash: " <> serialiseToRawBytesHexText dHash
+renderPlutusFailure (ValidationFailed evalErr) =
+  "Plutus script validation failed: " <> Plutus.render (Plutus.pretty evalErr)
+renderPlutusFailure (MissingSpendingTxIn txin) =
+  "Missing Plutus spending txin: " <> renderTxIn txin
+renderPlutusFailure (SpendingTxInMissingDatumHash txin) =
+  "Plutus spending txin is missing a datum hash: " <> renderTxIn txin
+renderPlutusFailure (IncompatibleBudget exBudget) =
+   "Incompatible Plutus budget: " <> Plutus.render (Plutus.pretty exBudget)
+
+_fromLedgerScriptFailure
+  :: Alonzo.ScriptFailure Ledger.StandardCrypto
+  -> ScriptFailure
+_fromLedgerScriptFailure (Alonzo.RedeemerNotNeeded rdmrPtr) =
+  UnnecessaryRedeemer $ fromAlonzoRdmrPtr rdmrPtr
+_fromLedgerScriptFailure (Alonzo.MissingScript rdmrPtr) =
+  MissingScript $ fromAlonzoRdmrPtr rdmrPtr
+_fromLedgerScriptFailure (Alonzo.MissingDatum dataHash) =
+  MissingDatum $ ScriptDataHash dataHash
+_fromLedgerScriptFailure (Alonzo.ValidationFailed evalErr) =
+  ValidationFailed evalErr
+_fromLedgerScriptFailure (Alonzo.UnknownTxIn txin) =
+  MissingSpendingTxIn $ fromShelleyTxIn txin
+_fromLedgerScriptFailure (Alonzo.InvalidTxIn txin) =
+  SpendingTxInMissingDatumHash $ fromShelleyTxIn txin
+_fromLedgerScriptFailure (Alonzo.IncompatibleBudget exBudget) =
+  IncompatibleBudget exBudget
+
+
+data TxExecutionUnitsError
+  = TxExecUnitsErrorPastHorizon Consensus.PastHorizonException
+  deriving Show
+
+renderTxExecutionUnitsError :: TxExecutionUnitsError -> Text
+renderTxExecutionUnitsError (TxExecUnitsErrorPastHorizon pastHorizException) =
+  "PastHorizonException: " <> Text.pack (show pastHorizException)
+
+
+-- | Run all the scripts in a transaction and return the execution units needed
+-- for each use of each script. The total execution units for the transaction
+-- is the sum of these.
 --
 evaluateTransactionExecutionUnits
   :: forall era mode.
@@ -519,20 +775,20 @@ evaluateTransactionExecutionUnits _eraInMode systemstart history pparams utxo tx
 -- Finding the (non-zero) balance of partially constructed transaction is
 -- useful for adjusting a transaction to be fully balanced.
 --
-evaluateTransactionBalance :: forall era.
-                              IsShelleyBasedEra era
-                           => ProtocolParameters
+evaluateTransactionBalance :: forall era. Ledger.CLI (ShelleyLedgerEra era)
+                           => ShelleyBasedEra era
+                           -> ProtocolParameters
                            -> Set PoolId
                            -> UTxO era
                            -> TxBody era
                            -> TxOutValue era
-evaluateTransactionBalance _ _ _ (ByronTxBody _) =
-    case shelleyBasedEra :: ShelleyBasedEra era of {}
+evaluateTransactionBalance sbe _ _ _ (ByronTxBody _) =
+    case sbe :: ShelleyBasedEra era of {}
     --TODO: we could actually support Byron here, it'd be different but simpler
 
-evaluateTransactionBalance pparams poolids utxo
+evaluateTransactionBalance sbe pparams poolids utxo
                            (ShelleyTxBody era txbody _ _ _) =
-    withLedgerConstraints era evalAdaOnly evalMultiAsset
+    withLedgerConstraints sbe evalAdaOnly evalMultiAsset
   where
     isNewPool :: Ledger.KeyHash Ledger.StakePool Ledger.StandardCrypto -> Bool
     isNewPool kh = StakePoolKeyHash kh `Set.notMember` poolids
@@ -670,7 +926,7 @@ instance Error (TxBodyErrorAutoBalance era) where
 
   displayError (TxBodyScriptExecutionError failures) =
       "The following scripts have execution failures:\n"
-   ++ unlines [ "the script for " ++ renderScriptWitnessIndex index
+   ++ unlines [ "the script for " ++ Text.unpack (renderScriptWitnessIndex index)
                 ++ " failed with " ++ displayError failure
               | (index, failure) <- failures ]
 
@@ -727,6 +983,7 @@ instance Error (TxBodyErrorAutoBalance era) where
 -- To do this it needs more information than 'makeTransactionBody', all of
 -- which can be queried from a local node.
 --
+{-
 makeTransactionBodyAutoBalance
   :: forall era mode.
      IsShelleyBasedEra era
@@ -845,20 +1102,4 @@ makeTransactionBodyAutoBalance eraInMode systemstart history pparams
    minUTxOHelper pparams' = case protocolParamMinUTxOValue pparams' of
                              Just minUtxo -> Right minUtxo
                              Nothing -> Left TxBodyErrorMissingParamMinUTxO
-
-
-substituteExecutionUnits :: Map ScriptWitnessIndex ExecutionUnits
-                         -> TxBodyContent BuildTx era
-                         -> TxBodyContent BuildTx era
-substituteExecutionUnits exUnitsMap =
-    mapTxScriptWitnesses f
-  where
-    f :: ScriptWitnessIndex
-      -> ScriptWitness witctx era
-      -> ScriptWitness witctx era
-    f _   wit@SimpleScriptWitness{} = wit
-    f idx wit@(PlutusScriptWitness langInEra version script datum redeemer _) =
-      case Map.lookup idx exUnitsMap of
-        Nothing      -> wit
-        Just exunits -> PlutusScriptWitness langInEra version script
-                                            datum redeemer exunits
+-}

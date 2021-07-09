@@ -22,6 +22,7 @@ module Cardano.Api (
     AnyCardanoEra(..),
     anyCardanoEra,
     InAnyCardanoEra(..),
+    shelleyBasedToCardanoEra,
 
     -- ** Shelley-based eras
     ShelleyBasedEra(..),
@@ -222,9 +223,9 @@ module Cardano.Api (
     scriptDataSupportedInEra,
 
     -- ** Fee calculation
+    BalanceTxBodyError(..),
     transactionFee,
     estimateTransactionFee,
-    evaluateTransactionFee,
     estimateTransactionKeyWitnessCount,
 
     -- ** Script execution units

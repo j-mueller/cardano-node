@@ -1,3 +1,4 @@
+
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingVia #-}
@@ -111,8 +112,8 @@ module Cardano.Api.TxBody (
     toAlonzoRdmrPtr,
     fromAlonzoRdmrPtr,
     fromByronTxIn,
-    renderTxIn,
     renderScriptWitnessIndex,
+    renderTxIn,
 
     -- * Data family instances
     AsType(AsTxId, AsTxBody, AsByronTxBody, AsShelleyTxBody, AsMaryTxBody),
@@ -156,9 +157,9 @@ import qualified Cardano.Crypto.Hashing as Byron
 import qualified Cardano.Ledger.Address as Shelley
 import qualified Cardano.Ledger.AuxiliaryData as Ledger (hashAuxiliaryData)
 import           Cardano.Ledger.BaseTypes (StrictMaybe (..), maybeToStrictMaybe)
-import qualified Cardano.Ledger.Credential as Shelley
 import qualified Cardano.Ledger.Core as Core
 import qualified Cardano.Ledger.Core as Ledger
+import qualified Cardano.Ledger.Credential as Shelley
 import qualified Cardano.Ledger.Era as Ledger
 import qualified Cardano.Ledger.Keys as Shelley
 import qualified Cardano.Ledger.SafeHash as SafeHash
@@ -849,13 +850,11 @@ instance ToJSON (TxOutValue era) where
   toJSON (TxOutAdaOnly _ ll) = toJSON ll
   toJSON (TxOutValue _ val) = toJSON val
 
-
 lovelaceToTxOutValue :: IsCardanoEra era => Lovelace -> TxOutValue era
 lovelaceToTxOutValue l =
     case multiAssetSupportedInEra cardanoEra of
       Left adaOnly     -> TxOutAdaOnly adaOnly  l
       Right multiAsset -> TxOutValue multiAsset (lovelaceToValue l)
-
 
 -- ----------------------------------------------------------------------------
 -- Transaction output datum (era-dependent)
@@ -2249,15 +2248,15 @@ data ScriptWitnessIndex =
    | ScriptWitnessIndexWithdrawal !Word
   deriving (Eq, Ord, Show)
 
-renderScriptWitnessIndex :: ScriptWitnessIndex -> String
+renderScriptWitnessIndex :: ScriptWitnessIndex -> Text
 renderScriptWitnessIndex (ScriptWitnessIndexTxIn index) =
-  "transaction input " <> show index <> " (in the order of the TxIds)"
+  "transaction input " <> Text.pack (show index) <> " (in the order of the TxIds)"
 renderScriptWitnessIndex (ScriptWitnessIndexMint index) =
-  "policyId " <> show index <> " (in the order of the PolicyIds)"
+  "policyId " <> Text.pack (show index) <> " (in the order of the PolicyIds)"
 renderScriptWitnessIndex (ScriptWitnessIndexCertificate index) =
-  "certificate " <> show index <> " (in the list order of the certificates)"
+  "certificate " <> Text.pack (show index) <> " (in the list order of the certificates)"
 renderScriptWitnessIndex (ScriptWitnessIndexWithdrawal index) =
-  "withdrawal " <> show index <> " (in the order of the StakeAddresses)"
+  "withdrawal " <> Text.pack (show index) <> " (in the order of the StakeAddresses)"
 
 toAlonzoRdmrPtr :: ScriptWitnessIndex -> Alonzo.RdmrPtr
 toAlonzoRdmrPtr widx =
@@ -2274,7 +2273,6 @@ fromAlonzoRdmrPtr (Alonzo.RdmrPtr tag n) =
       Alonzo.Mint  -> ScriptWitnessIndexMint        (fromIntegral n)
       Alonzo.Cert  -> ScriptWitnessIndexCertificate (fromIntegral n)
       Alonzo.Rewrd -> ScriptWitnessIndexWithdrawal  (fromIntegral n)
-
 
 mapTxScriptWitnesses :: forall era.
                         (forall witctx. ScriptWitnessIndex
@@ -2355,7 +2353,6 @@ mapTxScriptWitnesses f txbodycontent@TxBodyContent {
         , witness <- maybeToList (Map.lookup policyid witnesses)
         , let witness' = f (ScriptWitnessIndexMint ix) witness
         ]
-
 
 collectTxBodyScriptWitnesses :: forall era.
                                 TxBodyContent BuildTx era
