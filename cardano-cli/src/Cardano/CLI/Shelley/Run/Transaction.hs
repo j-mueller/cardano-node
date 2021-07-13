@@ -82,9 +82,9 @@ data ShelleyTxCmdError
   | ShelleyTxCmdMetadataJsonParseError !FilePath !String
   | ShelleyTxCmdMetadataConversionError !FilePath !TxMetadataJsonError
   | ShelleyTxCmdMetaValidationError !FilePath ![(Word64, TxMetadataRangeError)]
-  | ShelleyTxCmdScriptDataJsonParseError  FilePath String
-  | ShelleyTxCmdScriptDataConversionError FilePath ScriptDataJsonError
-  | ShelleyTxCmdScriptDataValidationError FilePath ScriptDataRangeError
+  | ShelleyTxCmdScriptDataJsonParseError  !FilePath !String
+  | ShelleyTxCmdScriptDataConversionError !FilePath !ScriptDataJsonError
+  | ShelleyTxCmdScriptDataValidationError !FilePath !ScriptDataRangeError
   | ShelleyTxCmdMetaDecodeError !FilePath !CBOR.DecoderError
   | ShelleyTxCmdBootstrapWitnessError !ShelleyBootstrapWitnessError
   | ShelleyTxCmdSocketEnvError !EnvSocketError
@@ -94,13 +94,13 @@ data ShelleyTxCmdError
   | ShelleyTxCmdTxSubmitErrorAllegra !(ApplyTxErr (ShelleyBlock StandardAllegra))
   | ShelleyTxCmdTxSubmitErrorMary !(ApplyTxErr (ShelleyBlock StandardMary))
   | ShelleyTxCmdTxSubmitErrorEraMismatch !EraMismatch
-  | ShelleyTxCmdTxFeatureMismatch AnyCardanoEra TxFeature
-  | ShelleyTxCmdTxBodyError SomeTxBodyError
-  | ShelleyTxCmdNotImplemented Text
-  | ShelleyTxCmdWitnessEraMismatch AnyCardanoEra AnyCardanoEra WitnessFile
-  | ShelleyTxCmdScriptLanguageNotSupportedInEra AnyScriptLanguage AnyCardanoEra
-  | ShelleyTxCmdScriptExpectedSimple FilePath AnyScriptLanguage
-  | ShelleyTxCmdScriptExpectedPlutus FilePath AnyScriptLanguage
+  | ShelleyTxCmdTxFeatureMismatch !AnyCardanoEra !TxFeature
+  | ShelleyTxCmdTxBodyError !TxBodyError
+  | ShelleyTxCmdNotImplemented !Text
+  | ShelleyTxCmdWitnessEraMismatch !AnyCardanoEra !AnyCardanoEra !WitnessFile
+  | ShelleyTxCmdScriptLanguageNotSupportedInEra !AnyScriptLanguage !AnyCardanoEra
+  | ShelleyTxCmdScriptExpectedSimple !FilePath !AnyScriptLanguage
+  | ShelleyTxCmdScriptExpectedPlutus !FilePath !AnyScriptLanguage
   | ShelleyTxCmdGenesisCmdError !ShelleyGenesisCmdError
   | ShelleyTxCmdPolicyIdsMissing [PolicyId]
   | ShelleyTxCmdPolicyIdsExcess  [PolicyId]
@@ -111,22 +111,13 @@ data ShelleyTxCmdError
       !TxBodyFile
       !AnyConsensusMode
       !AnyCardanoEra
-  | ShelleyTxCmdBalanceTxBody !SomeBalanceTxBodyError
+  | ShelleyTxCmdBalanceTxBody !TxBodyErrorAutoBalance
   | ShelleyTxCmdEraConsensusModeMismatchQuery !AnyConsensusMode !AnyCardanoEra
   | ShelleyTxCmdByronEraQuery
-  | ShelleyTxCmdLocalStateQueryError ShelleyQueryCmdLocalStateQueryError
+  | ShelleyTxCmdLocalStateQueryError !ShelleyQueryCmdLocalStateQueryError
 
   deriving Show
 
-data SomeBalanceTxBodyError where
-     SomeBalanceTxBodyError :: BalanceTxBodyError era -> SomeBalanceTxBodyError
-
-deriving instance Show SomeBalanceTxBodyError
-
-data SomeTxBodyError where
-     SomeTxBodyError :: TxBodyError era -> SomeTxBodyError
-
-deriving instance Show SomeTxBodyError
 
 renderShelleyTxCmdError :: ShelleyTxCmdError -> Text
 renderShelleyTxCmdError err =
@@ -194,8 +185,7 @@ renderShelleyTxCmdError err =
       renderFeature feature <> " cannot be used for " <> renderEra era <>
       " era transactions."
 
-    ShelleyTxCmdTxBodyError (SomeTxBodyError err') ->
-      "Transaction validaton error: " <> Text.pack (displayError err')
+    ShelleyTxCmdTxBodyError err' -> Text.pack (displayError err')
 
     ShelleyTxCmdNotImplemented msg ->
       "Feature not yet implemented: " <> msg
@@ -239,11 +229,12 @@ renderShelleyTxCmdError err =
     ShelleyTxCmdEraConsensusModeMismatchTxBalance fp mode era ->
        "Cannot balance " <> renderEra era <> " era transaction body (" <> show fp <>
        ") because is not supported in the " <> renderMode mode <> " consensus mode."
-    ShelleyTxCmdBalanceTxBody (SomeBalanceTxBodyError e) ->
-      "Transaction validaton error: " <> Text.pack (displayError e)
-    ShelleyTxCmdEraConsensusModeMismatchQuery _ _ -> "TODO"
-    ShelleyTxCmdByronEraQuery -> "TODO"
+    ShelleyTxCmdEraConsensusModeMismatchQuery (AnyConsensusMode cMode) (AnyCardanoEra era) ->
+      "Consensus mode and era mismatch. Consensus mode: " <> show cMode <>
+      " Era: " <> show era
+    ShelleyTxCmdByronEraQuery -> "Query not available in Byron era"
     ShelleyTxCmdLocalStateQueryError err' -> renderLocalStateQueryError err'
+    ShelleyTxCmdBalanceTxBody err' -> Text.pack $ displayError err'
 
 renderEra :: AnyCardanoEra -> Text
 renderEra (AnyCardanoEra ByronEra)   = "Byron"
@@ -361,7 +352,7 @@ runTxBuildRaw (AnyCardanoEra era)
         <*> validateTxMintValue      era mValue
 
     txBody <-
-      firstExceptT (ShelleyTxCmdTxBodyError . SomeTxBodyError) . hoistEither $
+      firstExceptT ShelleyTxCmdTxBodyError . hoistEither $
         makeTransactionBody txBodyContent
 
     firstExceptT ShelleyTxCmdWriteFileError . newExceptT $
@@ -413,7 +404,7 @@ runTxBuild (AnyCardanoEra era) (AnyConsensusModeParams cModeParams) networkId tx
           <*> validateTxOuts              era txouts
           <*> validateTxFee               era dummyFee
           <*> ((,) <$> validateTxValidityLowerBound era mLowerBound
-                  <*> validateTxValidityUpperBound era mUpperBound)
+                   <*> validateTxValidityUpperBound era mUpperBound)
           <*> validateTxMetadataInEra     era metadataSchema metadataFiles
           <*> validateTxAuxScripts        era scriptFiles
           <*> pure (BuildTxWith TxExtraScriptDataNone) --TODO alonzo: support this
@@ -424,55 +415,43 @@ runTxBuild (AnyCardanoEra era) (AnyConsensusModeParams cModeParams) networkId tx
           <*> validateTxUpdateProposal    era mUpdatePropFile
           <*> validateTxMintValue         era mValue
 
-
-      -- TODO: Probably should query the UTxO at the relevant address
       -- TODO: Combine queries
       let localConnInfo = LocalNodeConnectInfo
                             { localConsensusModeParams = CardanoModeParams (EpochSlots 21600)
                             , localNodeNetworkId       = networkId
                             , localNodeSocketPath      = sockPath
                             }
+
       sbe <- getSbe $ cardanoEraStyle era
       eInMode <- case toEraInMode era CardanoMode of
                    Just result -> return result
                    Nothing ->
-                     left (ShelleyTxCmdEraConsensusModeMismatchTxBalance outBody (AnyConsensusMode CardanoMode) (AnyCardanoEra era))
+                     left (ShelleyTxCmdEraConsensusModeMismatchTxBalance outBody
+                            (AnyConsensusMode CardanoMode) (AnyCardanoEra era))
 
-
-      let utxoQuery = QueryInEra eInMode $ QueryInShelleyBasedEra sbe (QueryUTxO . QueryUTxOByTxIn $ Set.fromList onlyInputs)
+      let utxoQuery = QueryInEra eInMode $ QueryInShelleyBasedEra sbe
+                        (QueryUTxO . QueryUTxOByTxIn $ Set.fromList onlyInputs)
       let pParamsQuery = QueryInEra eInMode $ QueryInShelleyBasedEra sbe QueryProtocolParameters
       utxo <- executeQuery era cModeParams localConnInfo utxoQuery
       pparams <- executeQuery era cModeParams localConnInfo pParamsQuery
-      (eraHistory, systemStart) <- firstExceptT ShelleyTxCmdAcquireFailure $ newExceptT $ queryEraHistoryAndSystemStart localNodeConnInfo Nothing
+      (eraHistory, systemStart) <- firstExceptT ShelleyTxCmdAcquireFailure
+                                     $ newExceptT $ queryEraHistoryAndSystemStart localNodeConnInfo Nothing
 
       let cAddr = case anyAddressInEra (shelleyBasedToCardanoEra sbe) changeAddr of
                     Just addr -> addr
                     Nothing -> error $ "runTxBuild: Byron address used: " <> show changeAddr
 
-      (balancedTxBody, execUnitsMap, fee) <-
-        firstExceptT (ShelleyTxCmdBalanceTxBody . SomeBalanceTxBodyError)
+      balancedTxBody <-
+        firstExceptT ShelleyTxCmdBalanceTxBody
           . hoistEither
           $ makeTransactionBodyAutoBalance sbe eInMode systemStart eraHistory
                                            pparams Set.empty utxo txBodyContent
-                                           cAddr
-      liftIO $ print ("Utxo: " :: String)
-      liftIO $ printUTxO sbe utxo
-      liftIO $ print ("Calculated fee: " :: String)
-      liftIO $ print fee
-      liftIO $ print $ "evaluateTransactionFee: " <> (show fee :: String)
-      liftIO $ print execUnitsMap
-      firstExceptT ShelleyTxCmdWriteFileError . newExceptT $
-        writeFileTextEnvelope fpath Nothing balancedTxBody
-    wrongMode -> left (ShelleyTxCmdUnsupportedMode (AnyConsensusMode wrongMode))
- where
+                                           cAddr Nothing
 
-   printUTxO :: ShelleyBasedEra era -> UTxO era -> IO ()
-   printUTxO sbe' ut =
-     case sbe' of
-       ShelleyBasedEraShelley -> print $ Aeson.toJSON ut
-       ShelleyBasedEraAllegra -> print $ Aeson.toJSON ut
-       ShelleyBasedEraMary -> print $ Aeson.toJSON ut
-       ShelleyBasedEraAlonzo -> print $ Aeson.toJSON ut
+      firstExceptT ShelleyTxCmdWriteFileError . newExceptT
+        $ writeFileTextEnvelope fpath Nothing balancedTxBody
+
+    wrongMode -> left (ShelleyTxCmdUnsupportedMode (AnyConsensusMode wrongMode))
 
 
 queryEraHistoryAndSystemStart

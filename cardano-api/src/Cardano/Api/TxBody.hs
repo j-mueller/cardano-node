@@ -39,6 +39,7 @@ module Cardano.Api.TxBody (
     genesisUTxOPseudoTxIn,
 
     -- * Transaction outputs
+    AnyTxOut (..),
     TxOut(..),
     TxOutValue(..),
     lovelaceToTxOutValue,
@@ -331,6 +332,14 @@ data TxOut era = TxOut (AddressInEra era)
 
 deriving instance Eq   (TxOut era)
 deriving instance Show (TxOut era)
+
+
+data AnyTxOut where
+     AnyTxOut :: IsCardanoEra era
+              => TxOut era
+              -> AnyTxOut
+
+deriving instance Show AnyTxOut
 
 instance IsCardanoEra era => ToJSON (TxOut era) where
   toJSON (TxOut addr val TxOutDatumHashNone) =
@@ -1358,12 +1367,12 @@ instance IsCardanoEra era => HasTextEnvelope (TxBody era) where
 -- Constructing transaction bodies
 --
 
-data TxBodyError era =
+data TxBodyError =
        TxBodyEmptyTxIns
      | TxBodyEmptyTxInsCollateral
      | TxBodyEmptyTxOuts
-     | TxBodyOutputNegative Quantity (TxOut era)
-     | TxBodyOutputOverflow Quantity (TxOut era)
+     | TxBodyOutputNegative Quantity AnyTxOut
+     | TxBodyOutputOverflow Quantity AnyTxOut
      | TxBodyMetadataError [(Word64, TxMetadataRangeError)]
      | TxBodyMintAdaError
      | TxBodyAuxDataHashInvalidError
@@ -1371,7 +1380,7 @@ data TxBodyError era =
      | TxBodyMissingProtocolParams
      deriving Show
 
-instance Error (TxBodyError era) where
+instance Error TxBodyError where
     displayError TxBodyEmptyTxIns  = "Transaction body has no inputs"
     displayError TxBodyEmptyTxInsCollateral =
       "Transaction body has no collateral inputs, but uses Plutus scripts"
@@ -1403,7 +1412,7 @@ instance Error (TxBodyError era) where
 makeTransactionBody :: forall era.
                        IsCardanoEra era
                     => TxBodyContent BuildTx era
-                    -> Either (TxBodyError era) (TxBody era)
+                    -> Either TxBodyError (TxBody era)
 makeTransactionBody =
     case cardanoEraStyle (cardanoEra :: CardanoEra era) of
       LegacyByronEra      -> makeByronTransactionBody
@@ -1778,7 +1787,7 @@ fromLedgerTxMintValue era body =
 
 
 makeByronTransactionBody :: TxBodyContent BuildTx ByronEra
-                         -> Either (TxBodyError ByronEra) (TxBody ByronEra)
+                         -> Either TxBodyError (TxBody ByronEra)
 makeByronTransactionBody TxBodyContent { txIns, txOuts } = do
     ins'  <- NonEmpty.nonEmpty txIns      ?! TxBodyEmptyTxIns
     let ins'' = NonEmpty.map (toByronTxIn . fst) ins'
@@ -1794,12 +1803,12 @@ makeByronTransactionBody TxBodyContent { txIns, txOuts } = do
             (Byron.UnsafeTx ins'' outs'' (Byron.mkAttributes ()))
             ()
   where
-    classifyRangeError :: TxOut ByronEra -> TxBodyError ByronEra
+    classifyRangeError :: TxOut ByronEra -> TxBodyError
     classifyRangeError
       txout@(TxOut (AddressInEra ByronAddressInAnyEra ByronAddress{})
                    (TxOutAdaOnly AdaOnlyInByronEra value) _)
-      | value < 0        = TxBodyOutputNegative (lovelaceToQuantity value) txout
-      | otherwise        = TxBodyOutputOverflow (lovelaceToQuantity value) txout
+      | value < 0        = TxBodyOutputNegative (lovelaceToQuantity value) (AnyTxOut txout)
+      | otherwise        = TxBodyOutputOverflow (lovelaceToQuantity value) (AnyTxOut txout)
 
     classifyRangeError
       (TxOut (AddressInEra ByronAddressInAnyEra (ByronAddress _))
@@ -1834,7 +1843,7 @@ getByronTxBodyContent (Annotated Byron.UnsafeTx{txInputs, txOutputs} _) =
 
 makeShelleyTransactionBody :: ShelleyBasedEra era
                            -> TxBodyContent BuildTx era
-                           -> Either (TxBodyError era) (TxBody era)
+                           -> Either TxBodyError (TxBody era)
 makeShelleyTransactionBody era@ShelleyBasedEraShelley
                            txbodycontent@TxBodyContent {
                              txIns,
@@ -1849,8 +1858,8 @@ makeShelleyTransactionBody era@ShelleyBasedEraShelley
 
     guard (not (null txIns)) ?! TxBodyEmptyTxIns
     sequence_
-      [ do guard (v >= 0) ?! TxBodyOutputNegative (lovelaceToQuantity v) txout
-           guard (v <= maxTxOut) ?! TxBodyOutputOverflow (lovelaceToQuantity v) txout
+      [ do guard (v >= 0) ?! TxBodyOutputNegative (lovelaceToQuantity v) (AnyTxOut txout)
+           guard (v <= maxTxOut) ?! TxBodyOutputOverflow (lovelaceToQuantity v) (AnyTxOut txout)
       | let maxTxOut = fromIntegral (maxBound :: Word64) :: Lovelace
       , txout@(TxOut _ (TxOutAdaOnly AdaOnlyInShelleyEra v) _) <- txOuts ]
     case txMetadata of
@@ -1914,8 +1923,8 @@ makeShelleyTransactionBody era@ShelleyBasedEraAllegra
 
     guard (not (null txIns)) ?! TxBodyEmptyTxIns
     sequence_
-      [ do guard (v >= 0) ?! TxBodyOutputNegative (lovelaceToQuantity v) txout
-           guard (v <= maxTxOut) ?! TxBodyOutputOverflow (lovelaceToQuantity v) txout
+      [ do guard (v >= 0) ?! TxBodyOutputNegative (lovelaceToQuantity v) (AnyTxOut txout)
+           guard (v <= maxTxOut) ?! TxBodyOutputOverflow (lovelaceToQuantity v) (AnyTxOut txout)
       | let maxTxOut = fromIntegral (maxBound :: Word64) :: Lovelace
       , txout@(TxOut _ (TxOutAdaOnly AdaOnlyInAllegraEra v) _) <- txOuts
       ]
@@ -1997,10 +2006,10 @@ makeShelleyTransactionBody era@ShelleyBasedEraMary
       , txout@(TxOut _ (TxOutValue MultiAssetInMaryEra v) _) <- txOuts
       , let allPositive       = case [ q | (_,q) <- valueToList v, q < 0 ] of
                                   []  -> Right ()
-                                  q:_ -> Left (TxBodyOutputNegative q txout)
+                                  q:_ -> Left (TxBodyOutputNegative q (AnyTxOut txout))
             allWithinMaxBound = case [ q | (_,q) <- valueToList v, q > maxTxOut ] of
                                   []  -> Right ()
-                                  q:_ -> Left (TxBodyOutputOverflow q txout)
+                                  q:_ -> Left (TxBodyOutputOverflow q (AnyTxOut txout))
       ]
     case txMetadata of
       TxMetadataNone      -> return ()
@@ -2089,10 +2098,10 @@ makeShelleyTransactionBody era@ShelleyBasedEraAlonzo
       , txout@(TxOut _ (TxOutValue MultiAssetInAlonzoEra v) _) <- txOuts
       , let allPositive       = case [ q | (_,q) <- valueToList v, q < 0 ] of
                                   []  -> Right ()
-                                  q:_ -> Left (TxBodyOutputNegative q txout)
+                                  q:_ -> Left (TxBodyOutputNegative q (AnyTxOut txout))
             allWithinMaxBound = case [ q | (_,q) <- valueToList v, q > maxTxOut ] of
                                   []  -> Right ()
-                                  q:_ -> Left (TxBodyOutputOverflow q txout)
+                                  q:_ -> Left (TxBodyOutputOverflow q (AnyTxOut txout))
       ]
     case txMetadata of
       TxMetadataNone      -> return ()

@@ -36,8 +36,8 @@ elif [ "$1" == "" ]; then
  plutusscriptinuse="$BASE/scripts/plutus/scripts/always-succeeds-spending.plutus"
  # This datum hash is the hash of the untyped 42
  scriptdatumhash="9e1199a988ba72ffd6e9c269cadb3b53b5f360ff99f112d9b2ee30c4d74ad88b"
- plutusrequiredspace=45070000 #44 works when this is 44 and time is 45
- plutusrequiredtime=45070000 #44
+ plutusrequiredspace=46070000
+ plutusrequiredtime=46070000
  datumfilepath="$BASE/scripts/plutus/data/42.datum"
  redeemerfilepath="$BASE/scripts/plutus/data/42.redeemer"
  echo "Always succeeds Plutus script in use. Any datum and redeemer combination will succeed."
@@ -101,14 +101,21 @@ dummyaddress=addr_test1vpqgspvmh6m2m5pwangvdg499srfzre2dd96qq57nlnw6yctpasy4
 
 lovelaceatplutusscriptaddr=$(jq -r ".[\"$plutusutxotxin\"].value.lovelace" $WORK/plutusutxo.json)
 
-txfee=$(expr $plutusrequiredspace + $plutusrequiredtime)
-spendable=$(expr $lovelaceatplutusscriptaddr - $plutusrequiredspace - $plutusrequiredtime)
+txfeeBefore=$(expr $plutusrequiredspace + $plutusrequiredtime)
+txfee=$txfeeBefore
+spendable=$(expr $lovelaceatplutusscriptaddr - $txfee)
+
+echo "Plutus txin"
+echo "$plutusutxotxin"
+
+echo "Collateral"
+echo "$txinCollateral"
 
 $CARDANO_CLI transaction build \
   --alonzo-era \
   --cardano-mode \
   --testnet-magic 42 \
-  --change-address "$utxoaddr" \
+  --change-address "$dummyaddress" \
   --tx-in $plutusutxotxin \
   --tx-in-collateral $txinCollateral \
   --tx-out "$dummyaddress+$spendable" \
@@ -131,7 +138,7 @@ $CARDANO_CLI transaction build \
 #  --tx-in-redeemer-file "$redeemerfilepath" \
 #  --tx-in-execution-units "($plutusrequiredtime, $plutusrequiredspace)" \
 #  --out-file $WORK/test-alonzo.body
-
+#
 $CARDANO_CLI transaction sign \
   --tx-body-file $WORK/test-alonzo.body \
   --testnet-magic "$TESTNET_MAGIC" \
