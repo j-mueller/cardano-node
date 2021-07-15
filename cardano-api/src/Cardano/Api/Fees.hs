@@ -752,7 +752,13 @@ data TxBodyErrorAutoBalance =
        -- The transaction should be changed to provide more input ada, or
        -- otherwise adjusted to need less (e.g. outputs, script etc).
        --
-     | TxBodyErrorAdaBalanceNegative Lovelace
+     | TxBodyErrorAdaBalanceNegative
+         Lovelace
+         -- ^ Transaction balance.
+         Lovelace
+         -- ^ Calculated Tx Fee.
+         AnyUTxO
+         -- ^ UTxO used in balance calculation.
 
        -- | There is enough ada to cover both the outputs and the fees, but the
        -- resulting change is too small: it is under the minimum value for
@@ -794,10 +800,12 @@ instance Error TxBodyErrorAutoBalance where
    ++ "TODO: move the Value renderer and parser from the CLI into the API and use them here"
    -- TODO: do this ^^
 
-  displayError (TxBodyErrorAdaBalanceNegative lovelace) =
+  displayError (TxBodyErrorAdaBalanceNegative balance totFee utxo) =
       "The transaction does not balance in its use of ada. The net balance "
-   ++ "of the transaction is negative: " ++ show lovelace ++ " lovelace. "
+   ++ "of the transaction is negative: " ++ show balance ++ " lovelace. "
    ++ "The usual solution is to provide more inputs, or inputs with more ada."
+   ++ "\n Calculated fee: " ++ show totFee
+   ++ "\n UTxO: \n" ++ Text.unpack (renderUTxO utxo)
 
   displayError (TxBodyErrorAdaBalanceTooSmall lovelace) =
       "The transaction does balance in its use of ada, however the net "
@@ -899,29 +907,37 @@ makeTransactionBodyAutoBalance sbe eraInMode systemstart history pparams
     let nkeys = fromMaybe (estimateTransactionKeyWitnessCount txbodycontentWithExecUnits)
                           mnkeys
         fee   = obtainIsCardanoEraConstraint sbe $ evaluateTransactionFee pparams txbodyZeroFeesChangeOutputZero nkeys 0 --TODO: byron keys
+        totalFee = execUnitsToLovelace exUnitsMap' + fee
 
     txbodyWithFee <- first TxBodyError $ -- TODO: impossible to fail now
                obtainIsEra sbe $  makeTransactionBody txbodycontentWithExecUnits {
-                 txFee = TxFeeExplicit explicitTxFees fee
+                 txFee = TxFeeExplicit explicitTxFees totalFee
                }
+
+    case feeEqual totalFee exUnitsMap' fee of
+      True -> return ()
+      False -> error $ "Fee not equal. Total Fee: "
+                     <> show totalFee
+                     <> " Ex total: " <> show (execUnitsToLovelace exUnitsMap')
+                     <> " Estimated fee: " <> show fee
 
     let balance = obtainCLI sbe $ evaluateTransactionBalance sbe pparams poolids utxo txbodyWithFee
     -- check if the balance is positive or negative
     -- in one case we can produce change, in the other the inputs are insufficient
     minUTxOValue <- getMinUTxOValue pparams
     case balance of
-      TxOutAdaOnly _ l -> balanceCheck minUTxOValue l
+      TxOutAdaOnly _ l -> obtainIsEra sbe $ balanceCheck (AnyUTxO utxo) totalFee minUTxOValue l
       TxOutValue _ v   ->
         case valueToLovelace v of
           Nothing -> Left $ error "TODO: non-ada assets not balanced"
-          Just c -> balanceCheck minUTxOValue c
+          Just c -> obtainIsEra sbe $ balanceCheck (AnyUTxO utxo) totalFee minUTxOValue c
 
     --TODO: we could add the extra fee for the CBOR encoding of the change,
     -- now that we know the magnitude of the change: i.e. 1-8 bytes extra.
 
     txbody3 <- first TxBodyError $ -- TODO: impossible to fail now
                obtainIsEra sbe $ makeTransactionBody txbodycontent {
-                 txFee  = TxFeeExplicit explicitTxFees fee,
+                 txFee  = TxFeeExplicit explicitTxFees totalFee,
                  txOuts = TxOut changeaddr balance TxOutDatumHashNone
                         : txOuts txbodycontentWithExecUnits,
                  txIns = txIns txbodycontentWithExecUnits
@@ -929,6 +945,17 @@ makeTransactionBodyAutoBalance sbe eraInMode systemstart history pparams
 
     return txbody3
  where
+   execUnitsToLovelace m =
+    let execUnits = Map.elems m
+        tot = foldl (+) 0 $ map (\(ExecutionUnits mem steps) -> mem + steps) execUnits
+    in Lovelace $ fromIntegral tot
+
+   feeEqual :: Lovelace -> Map ScriptWitnessIndex ExecutionUnits -> Lovelace -> Bool
+   feeEqual (Lovelace fee') m (Lovelace estimatedFee) =
+     let execUnits = Map.elems m
+         tot = foldl (+) 0 $ map (\(ExecutionUnits mem steps) -> mem + steps) execUnits
+     in fromIntegral fee' >= tot + fromIntegral estimatedFee
+
    obtainIsEra
      :: ShelleyBasedEra era
      -> (( IsCardanoEra era
@@ -959,9 +986,9 @@ makeTransactionBodyAutoBalance sbe eraInMode systemstart history pparams
    obtainIsCardanoEraConstraint ShelleyBasedEraAlonzo  f = f
 
 
-   balanceCheck :: Lovelace -> Lovelace -> Either TxBodyErrorAutoBalance ()
-   balanceCheck minUTxOValue balance
-    | balance < 0            = Left (TxBodyErrorAdaBalanceNegative balance)
+   balanceCheck :: AnyUTxO -> Lovelace -> Lovelace -> Lovelace -> Either TxBodyErrorAutoBalance ()
+   balanceCheck anyUTxO totFee minUTxOValue balance
+    | balance < 0            = Left (TxBodyErrorAdaBalanceNegative balance totFee anyUTxO)
       -- check the change is over the min utxo threshold
     | balance < minUTxOValue = Left (TxBodyErrorAdaBalanceTooSmall balance)
     | otherwise              = return ()

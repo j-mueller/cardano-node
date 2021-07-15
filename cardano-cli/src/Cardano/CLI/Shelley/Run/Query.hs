@@ -47,8 +47,7 @@ import           Cardano.Api.Byron
 import           Cardano.Api.Shelley
 
 import           Cardano.CLI.Environment (EnvSocketError, readEnvSocketPath, renderEnvSocketError)
-import           Cardano.CLI.Helpers (HelpersError (..), pPrintCBOR, renderHelpersError, hushM)
-import           Cardano.CLI.Mary.RenderValue (defaultRenderValueOptions, renderValue)
+import           Cardano.CLI.Helpers (HelpersError (..), hushM, pPrintCBOR, renderHelpersError)
 import           Cardano.CLI.Shelley.Orphans ()
 import qualified Cardano.CLI.Shelley.Output as O
 import           Cardano.CLI.Shelley.Parsers (OutputFile (..), QueryCmd (..))
@@ -700,7 +699,7 @@ printUtxo shelleyBasedEra' txInOutTuple =
     in Text.pack $ replicate (max 1 (len - slen)) ' ' ++ str
 
   printableValue :: TxOutValue era -> Text
-  printableValue (TxOutValue _ val) = renderValue defaultRenderValueOptions val
+  printableValue (TxOutValue _ val) = renderValue val
   printableValue (TxOutAdaOnly _ (Lovelace i)) = Text.pack $ show i
 
 

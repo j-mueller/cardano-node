@@ -354,7 +354,7 @@ runTxBuildRaw (AnyCardanoEra era)
     txBody <-
       firstExceptT ShelleyTxCmdTxBodyError . hoistEither $
         makeTransactionBody txBodyContent
-
+    liftIO $ print txBody
     firstExceptT ShelleyTxCmdWriteFileError . newExceptT $
       writeFileTextEnvelope fpath Nothing txBody
 
@@ -447,6 +447,7 @@ runTxBuild (AnyCardanoEra era) (AnyConsensusModeParams cModeParams) networkId tx
           $ makeTransactionBodyAutoBalance sbe eInMode systemStart eraHistory
                                            pparams Set.empty utxo txBodyContent
                                            cAddr Nothing
+      liftIO $ print balancedTxBody
 
       firstExceptT ShelleyTxCmdWriteFileError . newExceptT
         $ writeFileTextEnvelope fpath Nothing balancedTxBody
