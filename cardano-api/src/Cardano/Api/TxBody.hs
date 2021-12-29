@@ -2523,10 +2523,6 @@ makeShelleyTransactionBody era@ShelleyBasedEraAlonzo
     case txMintValue of
       TxMintNone        -> return ()
       TxMintValue _ v _ -> guard (selectLovelace v == 0) ?! TxBodyMintAdaError
-    case txInsCollateral of
-      TxInsCollateralNone | not (Set.null languages)
-        -> Left TxBodyEmptyTxInsCollateral
-      _ -> return ()
     case txProtocolParams of
       BuildTxWith Nothing | not (Set.null languages)
         -> Left TxBodyMissingProtocolParams
