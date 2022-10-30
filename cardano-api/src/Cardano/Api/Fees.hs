@@ -391,7 +391,7 @@ data ScriptExecutionError =
 
        -- | The redeemer pointer points to a script hash that does not exist
        -- in the transaction nor in the UTxO as a reference script"
-     | ScriptErrorRedeemerPointsToUnknownScriptHash ScriptWitnessIndex
+     | ScriptErrorRedeemerPointsToUnknownScriptHash ScriptWitnessIndex ResolvablePointers
 
        -- | A redeemer pointer points to a script that does not exist.
      | ScriptErrorMissingScript
@@ -435,9 +435,10 @@ instance Error ScriptExecutionError where
       \witnessed tx input and cannot be spent using a Plutus script witness."
       <> "The script hash is " <> show scriptHash <> "."
 
-  displayError (ScriptErrorRedeemerPointsToUnknownScriptHash scriptWitness) =
+  displayError (ScriptErrorRedeemerPointsToUnknownScriptHash scriptWitness resolveable) =
       renderScriptWitnessIndex scriptWitness <> " points to a script hash \
-      \that is not known."
+      \that is not known.\n" <>
+     "The pointers that can be resolved are: " <> show resolveable
 
   displayError (ScriptErrorMissingScript rdmrPtr resolveable) =
      "The redeemer pointer: " <> show rdmrPtr <> " points to a Plutus \
@@ -619,8 +620,8 @@ evaluateTransactionExecutionUnits _eraInMode systemstart history pparams utxo tx
           ScriptErrorNotPlutusWitnessedTxIn
             (fromAlonzoRdmrPtr rdmrPtr)
             (fromShelleyScriptHash scriptHash)
-        Alonzo.RedeemerPointsToUnknownScriptHash rdmrPtr ->
-          ScriptErrorRedeemerPointsToUnknownScriptHash $ fromAlonzoRdmrPtr rdmrPtr
+        Alonzo.RedeemerPointsToUnknownScriptHash rdmrPtr resolveable ->
+          ScriptErrorRedeemerPointsToUnknownScriptHash (fromAlonzoRdmrPtr rdmrPtr) resolveable
         -- This should not occur while using cardano-cli because we zip together
         -- the Plutus script and the use site (txin, certificate etc). Therefore
         -- the redeemer pointer will always point to a Plutus script.

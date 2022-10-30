@@ -263,6 +263,8 @@ import           Cardano.Api.Utils
 import           Cardano.Api.Value
 import           Cardano.Api.ValueParser
 
+import qualified Debug.Trace as Trace
+
 -- | Indicates whether a script is expected to fail or pass validation.
 data ScriptValidity
   = ScriptInvalid -- ^ Script is expected to fail validation.
@@ -3279,10 +3281,15 @@ makeShelleyTransactionBody era@ShelleyBasedEraBabbage
     maxShelleyTxInIx = fromIntegral $ maxBound @Word16
 
     witnesses :: [(ScriptWitnessIndex, AnyScriptWitness BabbageEra)]
-    witnesses = collectTxBodyScriptWitnesses txbodycontent
+    witnesses = 
+      let wits = collectTxBodyScriptWitnesses txbodycontent
+      in Trace.trace ("TxBody witnesses: " <> show (fst <$> wits)) wits
 
     scripts :: [Ledger.Script StandardBabbage]
-    scripts = catMaybes
+    scripts = Trace.trace ("TxBody scripts: " <> show scripts') scripts'
+
+    scripts' :: [Ledger.Script StandardBabbage]
+    scripts' = catMaybes
       [ toShelleyScript <$> scriptWitnessScript scriptwitness
       | (_, AnyScriptWitness scriptwitness) <- witnesses
       ]
